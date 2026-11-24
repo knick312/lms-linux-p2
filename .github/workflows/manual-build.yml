@@ -1,0 +1,96 @@
+name: Manual Build LMS Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-manual:
+    runs-on: ubuntu-latest
+    env:
+      KERNEL_VERSION: ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev bc curl jq rsync gcc-aarch64-linux-gnu crossbuild-essential-arm64 || true
+
+      - name: Prepare kernel source and module directory
+        run: |
+          set -eux
+          KERNEL_VERSION=$(curl -s https://www.kernel.org/releases.json | jq -r .latest_stable.version)
+          mkdir -p obj
+          TARBALL=linux-$KERNEL_VERSION.tar.xz
+          curl -sL https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%.*}.x/$TARBALL -o /tmp/$TARBALL
+          tar -xJf /tmp/$TARBALL -C obj
+          mv obj/linux-$KERNEL_VERSION obj/linux-src
+          KDIR=$(pwd)/obj/linux-src
+          # Create external module dir
+          MODULE_DIR=$(pwd)/out-module
+          mkdir -p "$MODULE_DIR"
+          cp -v lms/usr/src/linux/init/lms_guardian.c "$MODULE_DIR/"
+          cat > "$MODULE_DIR/Makefile" <<'EOF'
+obj-m := lms_guardian.o
+
+all:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+clean:
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
+EOF
+          echo "Prepared module directory: $MODULE_DIR"
+
+      - name: Build module for x86_64
+        run: |
+          set -eux
+          KDIR=$(pwd)/obj/linux-src
+          MODULE_DIR=$(pwd)/out-module
+          cd $KDIR
+          # prepare kernel headers for external module build
+          if [ -f arch/x86/configs/x86_64_defconfig ]; then
+            make x86_64_defconfig || true
+          else
+            make defconfig || true
+          fi
+          make -j2 modules_prepare || true
+          # build external module
+          make -C "$KDIR" M="$MODULE_DIR" ARCH=x86_64 -j2 modules || true
+          mkdir -p out-x86
+          cp -v "$MODULE_DIR"/lms_guardian.ko out-x86/ || true
+          cp -v arch/x86/boot/bzImage out-x86/ || true
+          tar -czf out-x86.tar.gz -C out-x86 . || true
+          ls -la out-x86 || true
+
+      - name: Build module for arm64
+        run: |
+          set -eux
+          KDIR=$(pwd)/obj/linux-src
+          MODULE_DIR=$(pwd)/out-module
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          cd $KDIR
+          if [ -f arch/arm64/configs/defconfig ]; then
+            make defconfig || true
+          else
+            make defconfig || true
+          fi
+          make -j2 CROSS_COMPILE=aarch64-linux-gnu- ARCH=arm64 modules_prepare || true
+          # build external module for arm64
+          make -C "$KDIR" M="$MODULE_DIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j2 modules || true
+          mkdir -p out-arm64
+          cp -v "$MODULE_DIR"/lms_guardian.ko out-arm64/ || true
+          cp -v arch/arm64/boot/Image out-arm64/ || true
+          tar -czf out-arm64.tar.gz -C out-arm64 . || true
+          ls -la out-arm64 || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lms-manual-build
+          path: |
+            obj/linux-src/out-x86
+            obj/linux-src/out-arm64
+            obj/linux-src/out-x86.tar.gz
+            obj/linux-src/out-arm64.tar.gz

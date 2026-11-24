@@ -1,0 +1,33 @@
+name: Build LMS kernel - small matrix
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate-small-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        kernel_version: ["5.15", "6.1", "7.1"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Print matrix
+        run: |
+          echo "Kernel version: ${{ matrix.kernel_version }}"
+
+      - name: List packaging patches
+        run: ls -la packaging/patches || true
+
+      - name: Syntax-check apply script
+        run: |
+          if [ -f packaging/patches/apply-lms-guardian.sh ]; then
+            bash -n packaging/patches/apply-lms-guardian.sh
+            echo "apply-lms-guardian.sh syntax OK"
+          else
+            echo "apply-lms-guardian.sh not found"; exit 1
+          fi
+
+      - name: Smoke: show repo size
+        run: du -sh . || true

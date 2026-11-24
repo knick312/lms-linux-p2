@@ -1,0 +1,16 @@
+﻿name: Build LMS kernel - push diag
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        kernel_version: ["5.15","6.1","7.1"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Echo kernel
+        run: echo "kernel ${{ matrix.kernel_version }}"
+

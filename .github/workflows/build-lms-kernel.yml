@@ -1,0 +1,154 @@
+name: Build LMS Kernel and Module
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: 'Kernel version to build (e.g. 7.1.6)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86_64, arm64]
+        kernel_version: ["5.10.219","5.15.146","6.1.86","6.9.16","7.1.6"]
+    env:
+      KERNEL_VERSION: ${{ matrix.kernel_version }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup variables
+        run: |
+          if [ -z "${KERNEL_VERSION}" ]; then
+            KERNEL_VERSION=$(curl -s https://www.kernel.org/releases.json | jq -r .latest_stable.version)
+          fi
+          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+          echo "ARCH=${{ matrix.arch }}" >> $GITHUB_ENV
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            echo "CROSS=aarch64-linux-gnu-" >> $GITHUB_ENV
+          else
+            echo "CROSS=" >> $GITHUB_ENV
+          fi
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev bc curl jq rsync \
+            gcc-aarch64-linux-gnu crossbuild-essential-arm64 || true
+
+      - name: Download kernel
+        run: |
+          mkdir -p obj
+          VERSION=${{ matrix.kernel_version }}
+          MAJOR=$(echo $VERSION | cut -d. -f1)
+          TARBALL=linux-$VERSION.tar.xz
+          URL=https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/$TARBALL
+          echo "Downloading $URL for arch ${{ matrix.arch }}"
+          curl -sL $URL -o /tmp/$TARBALL
+          tar -xJf /tmp/$TARBALL -C obj
+          mv obj/linux-$VERSION obj/linux-src
+
+      - name: Prepare external module build directory
+        run: |
+          set -eux
+          MODULE_DIR=$(pwd)/out-module
+          mkdir -p "$MODULE_DIR"
+          cp -v lms/usr/src/linux/init/lms_guardian.c "$MODULE_DIR/"
+          cat > "$MODULE_DIR/Makefile" <<'EOF'
+obj-m := lms_guardian.o
+
+all:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+clean:
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
+EOF
+          echo "Module dir prepared at $MODULE_DIR"
+
+      - name: Prepare kernel source for external module build
+        env:
+          ARCH: ${{ matrix.arch == 'arm64' && 'arm64' || 'x86_64' }}
+          CROSS_COMPILE: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-' || '' }}
+        run: |
+          set -eux
+          KDIR=$(pwd)/obj/linux-src
+          cd $KDIR
+          # Ensure a basic config present for modules_prepare
+          if [ "${ARCH}" = "arm64" ]; then
+            export ARCH=arm64
+            export CROSS_COMPILE=aarch64-linux-gnu-
+            if [ -f arch/arm64/configs/defconfig ]; then
+              make defconfig
+            else
+              make defconfig || true
+            fi
+          else
+            export ARCH=x86_64
+            if [ -f arch/x86/configs/x86_64_defconfig ]; then
+              make x86_64_defconfig
+            else
+              make defconfig || true
+            fi
+          fi
+          # Prepare headers for external module build
+          make -j$(nproc) modules_prepare
+
+      - name: Build external module against kernel source
+        env:
+          ARCH: ${{ matrix.arch == 'arm64' && 'arm64' || 'x86_64' }}
+          CROSS_COMPILE: ${{ matrix.arch == 'arm64' && 'aarch64-linux-gnu-' || '' }}
+        run: |
+          set -eux
+          KDIR=$(pwd)/obj/linux-src
+          MODULE_DIR=$(pwd)/out-module
+          # Build the module out-of-tree
+          make -C "$KDIR" M="$MODULE_DIR" ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} -j$(nproc) modules || true
+          mkdir -p "$KDIR/out"
+          # Copy built module if present
+          if [ -f "$MODULE_DIR/lms_guardian.ko" ]; then
+            cp -v "$MODULE_DIR/lms_guardian.ko" "$KDIR/out/" || true
+          else
+            echo "Warning: built module not found in $MODULE_DIR"
+          fi
+
+      - name: Collect artifacts
+        run: |
+          KDIR=$(pwd)/obj/linux-src
+          mkdir -p out
+          # copy kernel images if available
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            cp -v arch/arm64/boot/Image out/ || true
+            cp -v arch/arm64/boot/dts/* out/ || true
+          else
+            cp -v arch/x86/boot/bzImage out/ || true
+          fi
+          # copy module from KDIR/out if present
+          cp -v $KDIR/out/*lms_guardian*.ko out/ || true
+          tar -czf out-${{ matrix.arch }}.tar.gz -C out . || true
+
+      - name: Collect artifacts
+        run: |
+          KDIR=$(pwd)/obj/linux-src
+          mkdir -p out
+          # kernel image locations differ by arch
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            cp -v arch/arm64/boot/Image out/ || true
+            cp -v arch/arm64/boot/dts/* out/ || true
+          else
+            cp -v arch/x86/boot/bzImage out/ || true
+          fi
+          # modules and built-in module object
+          find . -name "lms_guardian*.ko" -exec cp -v {} out/ \; || true
+          tar -czf out-${{ matrix.arch }}.tar.gz -C out . || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lms-kernel-${{ matrix.arch }}
+          path: |
+            obj/linux-src/out-${{ matrix.arch }}.tar.gz
+            obj/linux-src/out

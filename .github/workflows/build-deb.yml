@@ -1,0 +1,47 @@
+name: Build LMS DKMS DEB
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev dpkg-dev devscripts build-essential dkms || true
+
+      - name: Prepare DKMS tarball (robust)
+        run: |
+          set -eux
+          mkdir -p out/artifacts
+          TMPDIR=$(mktemp -d)
+          echo "Staging files into $TMPDIR"
+          cp -v lms/usr/src/linux/init/lms_guardian.c "$TMPDIR/" || true
+          if [ -d packaging/dkms/lms_guardian-1.0 ]; then
+            cp -v packaging/dkms/lms_guardian-1.0/dkms.conf "$TMPDIR/" || true
+            cp -v packaging/dkms/lms_guardian-1.0/Makefile "$TMPDIR/" || true
+          else
+            echo "Warning: packaging/dkms/lms_guardian-1.0 not found in repo" >&2
+          fi
+          tar -czf out/artifacts/lms_guardian-dkms-1.0.tar.gz -C "$TMPDIR" .
+          ls -la out/artifacts
+          rm -rf "$TMPDIR"
+
+      - name: Build .deb
+        run: |
+          echo "Before building DEB, show artifacts:" && ls -la out/artifacts || true
+          chmod +x packaging/deb/build-deb.sh
+          ./packaging/deb/build-deb.sh || true
+          echo "After build, show out/deb:" && ls -la out/deb || true
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lms-deb
+          path: |
+            out/deb/**
